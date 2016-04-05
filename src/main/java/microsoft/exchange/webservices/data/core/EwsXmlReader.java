@@ -42,6 +42,11 @@ import javax.xml.stream.events.Characters;
 import javax.xml.stream.events.EndElement;
 import javax.xml.stream.events.StartElement;
 import javax.xml.stream.events.XMLEvent;
+import javax.xml.transform.OutputKeys;
+import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerFactory;
+import javax.xml.transform.stream.StreamResult;
+import javax.xml.transform.stream.StreamSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -88,6 +93,106 @@ public class EwsXmlReader {
     this.xmlReader = initializeXmlReader(stream);
   }
 
+
+
+  /*
+   * This class is used in a hack to get around a problem where the exchange server seems to send a xml 1.0
+   * preamble when it is supposed to send a xml 1.1 preamble.
+   * The problem is described here: https://github.com/OfficeDev/ews-java-api/issues/233
+   *
+   * Note: We first tried to use the fix in this pull-request: https://github.com/OfficeDev/ews-java-api/pull/409
+   * but that caused strange xml parsing bugs (https://jira.bouvet.no/browse/SSD-322). So now we have forked
+   * https://github.com/OfficeDev/ews-java-api and implemented our own hack to get around the xml
+   * version issue.
+   *
+   * Our fix is to replace the inputstream from the server response with a input stream that replaces
+   * the '''<?xml version="1.0";''' preamble with '''<?xml version="1.1";'''.
+   */
+  private static class HackedXml11Stream extends InputStream {
+    private final InputStream wrappedStream;
+    private boolean isLookingForXmlVersion = true;
+    private StringBuilder readData = new StringBuilder();
+
+    HackedXml11Stream(InputStream wrappedStream) {
+      this.wrappedStream = wrappedStream;
+    }
+
+    @Override
+    public int read() throws IOException {
+      if (!isLookingForXmlVersion) {
+        // we have dealt with the xml version hacking, so we can just delegate directly to the
+        // wrapped stream.
+        return wrappedStream.read();
+      }
+
+      int data = wrappedStream.read();
+      if (data == -1) {
+        return -1;
+      }
+
+      // check if we have finished reading the xml preamble yet.
+      readData.append((char)data);
+      String xml10Preamble = "<?xml version=\"1.0";
+      if (readData.toString().equals(xml10Preamble)) {
+        // replace the '0' with '1'
+        isLookingForXmlVersion = false;
+        return '1';
+      }
+
+      if (readData.length() >= xml10Preamble.length()) {
+        // this doesn't look like a xml 1.0 response, so we can stop looking for the xml preamble now.
+        isLookingForXmlVersion = false;
+      }
+
+      return data;
+    }
+
+    @Override
+    public int read(byte b[]) throws IOException {
+      if (isLookingForXmlVersion) {
+        // we are still reading the xml preamble, so call the super method, which will
+        // end up calling our "int read()" method (where we do the xml preamble handling).
+        return super.read(b);
+      } else {
+        // We are done with the xml version hacking, so we can delegate directly to the wrappedStream (which
+        // is probably more efficient).
+        return wrappedStream.read(b);
+      }
+    }
+
+    @Override
+    public int read(byte b[], int off, int len) throws IOException {
+      if (isLookingForXmlVersion) {
+        // we are still reading the xml preamble, so call the super method, which will
+        // end up calling our "int read()" method (where we do the xml preamble handling).
+        return super.read(b, off, len);
+      } else {
+        // We are done with the xml version hacking, so we can delegate directly to the wrappedStream (which
+        // is probably more efficient).
+        return wrappedStream.read(b, off, len);
+      }
+    }
+
+    @Override
+    public int available() throws IOException {
+      return wrappedStream.available();
+    }
+
+    /**
+     * Closes this input stream and releases any system resources associated
+     * with the stream.
+     *
+     * <p> The <code>close</code> method of <code>InputStream</code> does
+     * nothing.
+     *
+     * @exception  IOException  if an I/O error occurs.
+     */
+    public void close() throws IOException {
+      wrappedStream.close();
+    }
+
+  }
+
   /**
    * Initializes the XML reader.
    *
@@ -96,6 +201,20 @@ public class EwsXmlReader {
    * @throws Exception on error
    */
   protected XMLEventReader initializeXmlReader(InputStream stream) throws Exception {
+    // we use our own wrapper stream class to convert the erroneous xml version 1.0 preamble
+    // into the version 1.1.
+    stream = new HackedXml11Stream(stream);
+
+    // ... But we get strange xml parsing errors (https://jira.bouvet.no/browse/SSD-322) if we try to parse
+    // the now-version-1.1 xml as-is. For some reason it work if we pretty-print the xml first. So that is
+    // what we do, at least for now until we can figure out what the real issue is. Hopefully, these issues
+    // will get fixed in the official version of ews-java-api at some point.
+    Transformer transformer = TransformerFactory.newInstance().newTransformer();
+    transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+    ByteArrayOutputStream formattedXmlOutputStream = new ByteArrayOutputStream();
+    transformer.transform(new StreamSource(stream), new StreamResult(formattedXmlOutputStream));
+    stream = new ByteArrayInputStream(formattedXmlOutputStream.toByteArray());
+
     XMLInputFactory inputFactory = XMLInputFactory.newInstance();
     inputFactory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
 
