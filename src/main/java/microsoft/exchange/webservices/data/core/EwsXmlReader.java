@@ -61,6 +61,23 @@ import java.io.UnsupportedEncodingException;
  */
 public class EwsXmlReader {
 
+  // This is used in a hack to force the parser to use xml version 1.1. It is a part of the fix for
+  // https://jira.bouvet.no/browse/SSD-322. Note that these are always set back to false in the
+  // initializeXmlReader() method, in order to minimize the risk of them being stuck to true by
+  // mistake.
+  public static ThreadLocal<Boolean> forceXMLversion11 = new ThreadLocal<Boolean>() {
+    @Override
+    public Boolean initialValue() {
+      return false;
+    }
+  };
+  public static ThreadLocal<Boolean> forceXMLFormatting = new ThreadLocal<Boolean>() {
+    @Override
+    public Boolean initialValue() {
+      return false;
+    }
+  };
+
   private static final Log LOG = LogFactory.getLog(EwsXmlReader.class);
 
   /**
@@ -201,19 +218,27 @@ public class EwsXmlReader {
    * @throws Exception on error
    */
   protected XMLEventReader initializeXmlReader(InputStream stream) throws Exception {
-    // we use our own wrapper stream class to convert the erroneous xml version 1.0 preamble
-    // into the version 1.1.
-    stream = new HackedXml11Stream(stream);
+    if (forceXMLversion11.get()) {
+      forceXMLversion11.set(false); // clear this here, just in case the calling code doesn't do it.
+      // we use our own wrapper stream class to convert the erroneous xml version 1.0 preamble
+      // into the version 1.1.
+      stream = new HackedXml11Stream(stream);
+    }
 
-    // ... But we get strange xml parsing errors (https://jira.bouvet.no/browse/SSD-322) if we try to parse
-    // the now-version-1.1 xml as-is. For some reason it work if we pretty-print the xml first. So that is
-    // what we do, at least for now until we can figure out what the real issue is. Hopefully, these issues
-    // will get fixed in the official version of ews-java-api at some point.
-    Transformer transformer = TransformerFactory.newInstance().newTransformer();
-    transformer.setOutputProperty(OutputKeys.INDENT, "yes");
-    ByteArrayOutputStream formattedXmlOutputStream = new ByteArrayOutputStream();
-    transformer.transform(new StreamSource(stream), new StreamResult(formattedXmlOutputStream));
-    stream = new ByteArrayInputStream(formattedXmlOutputStream.toByteArray());
+    if (forceXMLFormatting.get()) {
+      forceXMLFormatting.set(false); // clear this here, just in case the calling code doesn't do it.
+      // ... But we sometimes get strange xml parsing errors (https://jira.bouvet.no/browse/SSD-322) if we try to parse
+      // the now-version-1.1 xml as-is. For some reason it work if we pretty-print the xml first. So that is
+      // what we do, at least for now until we can figure out what the real issue is. Hopefully, these issues
+      // will get fixed in the official version of ews-java-api at some point.
+      Transformer transformer = TransformerFactory.newInstance().newTransformer();
+      transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+      transformer.setOutputProperty(OutputKeys.VERSION, "1.1"); // we have to set this explicitly, since it defaults to 1.0
+
+      ByteArrayOutputStream formattedXmlOutputStream = new ByteArrayOutputStream();
+      transformer.transform(new StreamSource(stream), new StreamResult(formattedXmlOutputStream));
+      stream = new ByteArrayInputStream(formattedXmlOutputStream.toByteArray());
+    }
 
     XMLInputFactory inputFactory = XMLInputFactory.newInstance();
     inputFactory.setProperty(XMLInputFactory.SUPPORT_DTD, false);
