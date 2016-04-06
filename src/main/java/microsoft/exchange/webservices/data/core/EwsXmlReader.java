@@ -48,11 +48,15 @@ import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.stream.StreamResult;
 import javax.xml.transform.stream.StreamSource;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
 
@@ -77,6 +81,14 @@ public class EwsXmlReader {
       return false;
     }
   };
+  public static ThreadLocal<Boolean> forceXMLRemoveSuspectCharacterEntities = new ThreadLocal<Boolean>() {
+    @Override
+    public Boolean initialValue() {
+      return false;
+    }
+  };
+
+  public static ThreadLocal<String> forceXMLSaveToFile = new ThreadLocal<String>();
 
   private static final Log LOG = LogFactory.getLog(EwsXmlReader.class);
 
@@ -218,15 +230,46 @@ public class EwsXmlReader {
    * @throws Exception on error
    */
   protected XMLEventReader initializeXmlReader(InputStream stream) throws Exception {
+
+    if (!isNullOrEmpty(forceXMLSaveToFile.get())) {
+      // The calling code wants to store the response in a file.
+      String fileName = forceXMLSaveToFile.get();
+      forceXMLSaveToFile.set(null);
+      FileOutputStream fileOutputStream = new FileOutputStream(fileName);
+      int data = stream.read();
+      while(data != -1) {
+        fileOutputStream.write(data);
+        data = stream.read();
+      }
+      fileOutputStream.close();
+      stream = new FileInputStream(fileName);
+    }
+
+    if (forceXMLRemoveSuspectCharacterEntities.get()) {
+      forceXMLRemoveSuspectCharacterEntities.set(false);
+      StringBuilder sb = new StringBuilder();
+      BufferedReader br = new BufferedReader(new InputStreamReader(stream));
+      String read;
+      while((read=br.readLine()) != null) {
+        sb.append(read);
+      }
+      br.close();
+      String response = sb.toString();
+      String fudgedResponse = response;
+
+      fudgedResponse = fudgedResponse.replace("&#xB;", "");
+      stream = new ByteArrayInputStream(fudgedResponse.getBytes("UTF-8"));
+    }
+
     if (forceXMLversion11.get()) {
-      forceXMLversion11.set(false); // clear this here, just in case the calling code doesn't do it.
+      forceXMLversion11.set(false);
       // we use our own wrapper stream class to convert the erroneous xml version 1.0 preamble
       // into the version 1.1.
       stream = new HackedXml11Stream(stream);
     }
 
     if (forceXMLFormatting.get()) {
-      forceXMLFormatting.set(false); // clear this here, just in case the calling code doesn't do it.
+      forceXMLFormatting.set(false);
       // ... But we sometimes get strange xml parsing errors (https://jira.bouvet.no/browse/SSD-322) if we try to parse
       // the now-version-1.1 xml as-is. For some reason it work if we pretty-print the xml first. So that is
       // what we do, at least for now until we can figure out what the real issue is. Hopefully, these issues
